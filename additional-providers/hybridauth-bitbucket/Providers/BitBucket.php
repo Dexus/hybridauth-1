@@ -1,87 +1,95 @@
 <?php
-/**
- * HybridAuth
- * http://hybridauth.sourceforge.net | https://github.com/hybridauth/hybridauth
- * (c) 2009-2015 HybridAuth authors | hybridauth.sourceforge.net/licenses.html
- */
+/*!
+* Hybridauth
+* https://hybridauth.github.io | https://github.com/hybridauth/hybridauth
+*  (c) 2015 Hybridauth authors | https://hybridauth.github.io/license.html
+*/
+
+namespace Hybridauth\Provider;
+
+use Hybridauth\Adapter\OAuth2;
+use Hybridauth\Exception\UnexpectedValueException;
+use Hybridauth\Data;
+use Hybridauth\User;
 
 /**
- * BitBucket Provider for HybridAuth
- * @package GitLauncher\HybridAuth\Providers
- * @author Gabriel Somoza <contact@gabrielsomoza.com>
- * @coauthor Filippo "Shade" <legend_k@live.it>
+ *
  */
-class Hybrid_Providers_BitBucket extends Hybrid_Provider_Model_OAuth2
+class BitBucket extends OAuth2
 {
-
-    // default permissions
-    // (no scope) => public read-only access (includes public user profile info, public repo info, and gists).
-    public $scope = '';
+    /**
+    * {@inheritdoc}
+    */
+    public $scope = 'email';
 
     /**
-     * IDp wrappers initializer
-     */
-    function initialize()
-    {
-        parent::initialize();
-        // provider api end-points
-        $this->api->api_base_url      = "https://api.bitbucket.org/2.0/";
-        $this->api->authorize_url     = "https://bitbucket.org/site/oauth2/authorize";
-        $this->api->token_url         = "https://bitbucket.org/site/oauth2/access_token";
-    }
+    * {@inheritdoc}
+    */
+    protected $apiBaseUrl = 'https://api.bitbucket.org/2.0/';
+
     /**
-     * load the user profile from the IDp api client
-     */
-    function getUserProfile()
+    * {@inheritdoc}
+    */
+    protected $authorizeUrl = 'https://bitbucket.org/site/oauth2/authorize';
+
+    /**
+    * {@inheritdoc}
+    */
+    protected $accessTokenUrl = 'https://bitbucket.org/site/oauth2/access_token';
+
+    /**
+    * {@inheritdoc}
+    */
+    public function getUserProfile()
     {
+        $response = $this->apiRequest('user');
 
-        try {
-        
-            $response = $this->api->get( 'user' );
-            
-            $this->user->profile->identifier    = @$response->uuid;
-            $this->user->profile->username      = @$response->username;
-            $this->user->profile->displayName   = @$response->display_name;
-            
-            // Removing the last "/" char from the avatar link and adding a 0 ensures the maximum size for the avatar
-            $this->user->profile->photoURL      = rtrim(@$response->links->avatar->href, '/') . "0";
-            $this->user->profile->webSiteURL    = @$response->website;
-            $this->user->profile->region        = @$response->location;
+        $data = new Data\Collection($response);
 
-            if (!$this->user->profile->displayName) {
-                $this->user->profile->displayName = @$response->username;
-            }
-            
-        } catch(\Exception $e) {
-            throw new \Exception( "User profile request failed! {$this->providerId} returned an error while requesting the user profile.", 6 );
+        if (! $data->exists('uuid')) {
+            throw new UnexpectedValueException('Provider API returned an unexpected response.');
         }
 
-        // request user emails from BitBucket api
-        try {
-        
-            $username = $this->user->profile->username;
+        $userProfile = new User\Profile();
 
-            $emails = $this->api->api("user/emails");
-            
-            foreach ($emails->values as $email) {
-                if ($email->is_primary) {
-                    $this->user->profile->email = $email->email;
-                    $this->user->profile->emailVerified = (bool)$email->is_confirmed;
+        $userProfile->identifier  = $data->get('uuid');
+        $userProfile->displayName = $data->get('display_name');
+        $userProfile->email       = $data->get('email');
+        $userProfile->webSiteURL  = $data->get('website');
+        $userProfile->region      = $data->get('location');
+
+        $userProfile->displayName = $userProfile->displayName ?: $data->get('username');
+
+        if (empty($userProfile->email) && strpos($this->scope, 'email') !== false) {
+            $userProfile = $this->requestUserEmail($userProfile);
+        }
+
+        return $userProfile;
+    }
+
+    /**
+    *
+    * https://developer.github.com/v3/users/emails/
+    */
+    protected function requestUserEmail($userProfile)
+    {
+        try {
+            $response = $this->apiRequest('user/emails');
+            foreach ($response->values as $idx => $item) {
+                if (! empty($item->is_primary) && $item->is_primary == true) {
+                    $userProfile->email = $item->email;
+
+                    if (! empty($item->is_confirmed) && $item->is_confirmed == true) {
+                        $userProfile->emailVerified = $userProfile->email;
+                    }
+
                     break;
                 }
             }
-            
-            // if no primary email found for some reason, fall back to using the first email or fail gracefully
-            if (!$this->user->profile->email && is_array($emails) && !empty($emails[0])) {
-                $this->user->profile->email = $emails[0]->email;
-            }
-            
-        } catch (\Exception $e) {
-            throw new \Exception("User email request failed! {$this->providerId} returned an error: $e", 6);
+        } // user email is not mandatory so keep it quite
+        catch (\Exception $e) {
         }
-        
-        return $this->user->profile;
-    }
-    
-}
 
+        return $userProfile;
+    }
+}
